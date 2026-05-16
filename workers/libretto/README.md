@@ -8,7 +8,7 @@ All `npm` and `ntn` commands below assume you are inside `workers/libretto/`.
 
 - `buildWorkflow`: asks Libretto Cloud to build a browser workflow, polls until a deployed workflow is available, runs it once, and optionally creates a recurring schedule.
 - `checkBuild`: checks a Libretto AI workflow build status when a build needs manual follow-up.
-- `runWorkflow`: starts a deployed Libretto workflow job and passes the target Notion database ID in the job params.
+- `runWorkflow`: starts a deployed Libretto workflow job and passes the target Notion database URL or ID in the job params.
 
 Before calling `buildWorkflow`, the Custom Agent should create or select the target database, add the properties the browser workflow should populate, and include the expected row shape in the prompt.
 
@@ -16,7 +16,7 @@ Example tool input:
 
 ```json
 {
-  "databaseId": "cdea7ded34f04440897458af4957e00f",
+  "databaseUrl": "https://www.notion.so/3c9bab308c7c4808b9c122df75a8e48f",
   "initialUrl": "https://example.com",
   "prompt": "Build a browser workflow that extracts listings. Output each row with properties matching this Notion database shape: {\"Title\":\"Mid-century chair\",\"URL\":\"https://example.com/listing/123\",\"Price\":240}.",
   "schedule": null

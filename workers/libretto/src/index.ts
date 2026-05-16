@@ -17,9 +17,9 @@ worker.tool("buildWorkflow", {
   description:
     "Build a Libretto browser workflow, wait for the deployed workflow, run it once, and optionally schedule recurring runs. Before calling this tool, create or select the result database, add the properties the workflow should populate, and include the expected row shape in the prompt.",
   schema: j.object({
-    databaseId: j
+    databaseUrl: j
       .string()
-      .describe("The Notion database ID where workflow results should be written. The database must already exist and contain the properties the workflow should populate."),
+      .describe("The Notion database URL or database ID where workflow results should be written. The database must already exist and contain the properties the workflow should populate."),
     initialUrl: j
       .string()
       .describe("The URL where Libretto should start the browser workflow."),
@@ -31,7 +31,8 @@ worker.tool("buildWorkflow", {
       .nullable()
       .describe("Cron expression for recurring Libretto runs, or null for no schedule."),
   }),
-  execute: async ({ databaseId, initialUrl, prompt, schedule }) => {
+  execute: async ({ databaseUrl, initialUrl, prompt, schedule }) => {
+    const databaseId = extractNotionDatabaseId(databaseUrl);
     const params = { database_id: databaseId };
     const build = await callLibretto("/v1/workflows/build", {
       descriptions: [prompt],
@@ -92,9 +93,9 @@ worker.tool("runWorkflow", {
     "Start a deployed Libretto browser workflow job and route its results back to a Notion database.",
   schema: j.object({
     workflow: j.string().describe("The deployed Libretto workflow name."),
-    databaseId: j
+    databaseUrl: j
       .string()
-      .describe("The Notion database ID where workflow results should be written."),
+      .describe("The Notion database URL or database ID where workflow results should be written."),
     paramsJson: j
       .string()
       .nullable()
@@ -108,7 +109,8 @@ worker.tool("runWorkflow", {
       .nullable()
       .describe("Optional timeout in seconds, or null for Libretto default."),
   }),
-  execute: async ({ workflow, databaseId, paramsJson, nonce, timeoutSeconds }) => {
+  execute: async ({ workflow, databaseUrl, paramsJson, nonce, timeoutSeconds }) => {
+    const databaseId = extractNotionDatabaseId(databaseUrl);
     const params = paramsJson ? parseJsonObject(paramsJson, "paramsJson") : {};
 
     return callLibretto("/v1/jobs/create", {
@@ -264,6 +266,24 @@ function asString(value: unknown): string {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function extractNotionDatabaseId(value: string): string {
+  const match = value.match(/[0-9a-fA-F]{32}/);
+  if (!match) {
+    throw new Error(
+      "Expected a Notion database URL or database ID containing 32 hexadecimal characters",
+    );
+  }
+
+  const raw = match[0].toLowerCase();
+  return [
+    raw.slice(0, 8),
+    raw.slice(8, 12),
+    raw.slice(12, 16),
+    raw.slice(16, 20),
+    raw.slice(20),
+  ].join("-");
 }
 
 async function waitForBuild(buildId: string) {
