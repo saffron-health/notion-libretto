@@ -36,11 +36,13 @@ export async function callLibretto(
     );
   }
 
-  if (!isJsonValue(body)) {
+  const unwrapped = unwrapResponseJson(body);
+
+  if (!isJsonValue(unwrapped)) {
     throw new Error("Libretto API returned a non-JSON response");
   }
 
-  return body;
+  return unwrapped;
 }
 
 export function parseJsonObject(value: string, label: string): JsonObject {
@@ -75,4 +77,17 @@ function isJsonValue(value: unknown): value is JsonValue {
   }
 
   return isJsonObject(value);
+}
+
+function unwrapResponseJson(value: unknown): unknown {
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    "json" in value &&
+    isJsonValue((value as { json?: unknown }).json)
+  ) {
+    return (value as { json: JsonValue }).json;
+  }
+
+  return value;
 }

@@ -19,7 +19,7 @@ Example tool input:
   "databaseUrl": "https://www.notion.so/3c9bab308c7c4808b9c122df75a8e48f",
   "initialUrl": "https://example.com",
   "prompt": "Build a browser workflow that extracts listings. Output each row with properties matching this Notion database shape: {\"Title\":\"Mid-century chair\",\"URL\":\"https://example.com/listing/123\",\"Price\":240}.",
-  "schedule": null
+  "schedule": ""
 }
 ```
 

@@ -6,8 +6,8 @@ import { callLibretto, parseJsonObject } from "./libretto.js";
 const worker = new Worker();
 export default worker;
 
-const BUILD_POLL_ATTEMPTS = 30;
-const BUILD_POLL_INTERVAL_MS = 2_000;
+const BUILD_POLL_ATTEMPTS = 8;
+const BUILD_POLL_INTERVAL_MS = 1_500;
 
 type SchemaProperty = { type: string; [key: string]: unknown };
 type Schema = Record<string, SchemaProperty>;
@@ -28,8 +28,7 @@ worker.tool("buildWorkflow", {
       .describe("The browser workflow instructions Libretto should build. Include the fields/properties to extract and the expected output row shape that matches the target Notion database."),
     schedule: j
       .string()
-      .nullable()
-      .describe("Cron expression for recurring Libretto runs, or null for no schedule."),
+      .describe("Cron expression for recurring Libretto runs, or an empty string for no schedule."),
   }),
   execute: async ({ databaseUrl, initialUrl, prompt, schedule }) => {
     const databaseId = extractNotionDatabaseId(databaseUrl);
@@ -58,11 +57,12 @@ worker.tool("buildWorkflow", {
       workflow,
       params,
     });
-    const scheduled = schedule
+    const cronExpr = schedule.trim();
+    const scheduled = cronExpr
       ? await callLibretto("/v1/schedules/create", {
           workflow,
           params,
-          cron_expr: schedule,
+          cron_expr: cronExpr,
         })
       : null;
 
