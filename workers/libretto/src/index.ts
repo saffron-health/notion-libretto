@@ -56,6 +56,7 @@ worker.tool("buildWorkflow", {
     const run = await callLibretto("/v1/jobs/create", {
       workflow,
       params,
+      ...getLibrettoCallbackConfig(),
     });
     const cronExpr = schedule.trim();
     const scheduled = cronExpr
@@ -63,6 +64,7 @@ worker.tool("buildWorkflow", {
           workflow,
           params,
           cron_expr: cronExpr,
+          ...getLibrettoCallbackConfig(),
         })
       : null;
 
@@ -119,6 +121,7 @@ worker.tool("runWorkflow", {
         ...params,
         database_id: databaseId,
       },
+      ...getLibrettoCallbackConfig(),
       ...(nonce ? { nonce } : {}),
       ...(timeoutSeconds ? { timeout_seconds: timeoutSeconds } : {}),
     });
@@ -140,13 +143,8 @@ worker.webhook("insertIntoDatabase", {
         }
       }
 
-      const payload = event.body as { data?: unknown; database_id?: unknown };
-      const databaseId = payload.database_id;
-      const data = payload.data;
+      const { databaseId, data } = parseInsertPayload(event.body);
 
-      if (typeof databaseId !== "string" || databaseId.length === 0) {
-        throw new Error("Missing or invalid `database_id` in payload");
-      }
       if (!isPlainObject(data)) {
         throw new Error("Missing or invalid `data` in payload (must be a JSON object)");
       }
@@ -266,6 +264,47 @@ function asString(value: unknown): string {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function getLibrettoCallbackConfig(): {
+  callback_url: string;
+  callback_secret: string;
+} {
+  const callbackUrl = process.env.LIBRETTO_CALLBACK_URL;
+  const callbackSecret = process.env.LIBRETTO_CALLBACK_SECRET;
+
+  if (!callbackUrl) {
+    throw new Error("LIBRETTO_CALLBACK_URL is not configured");
+  }
+  if (!callbackSecret) {
+    throw new Error("LIBRETTO_CALLBACK_SECRET is not configured");
+  }
+
+  return {
+    callback_url: callbackUrl,
+    callback_secret: callbackSecret,
+  };
+}
+
+function parseInsertPayload(body: unknown): {
+  databaseId: string;
+  data: unknown;
+} {
+  if (!isPlainObject(body)) {
+    throw new Error("Webhook payload must be a JSON object");
+  }
+
+  const databaseId = body.database_id;
+  const directData = body.data;
+  const resultData = isPlainObject(body.result) ? body.result.data : undefined;
+  const result = isPlainObject(body.result) ? body.result : undefined;
+  const data = directData ?? resultData ?? result;
+
+  if (typeof databaseId !== "string" || databaseId.length === 0) {
+    throw new Error("Missing or invalid `database_id` in payload");
+  }
+
+  return { databaseId, data };
 }
 
 function extractNotionDatabaseId(value: string): string {

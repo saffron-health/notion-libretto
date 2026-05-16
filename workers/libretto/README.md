@@ -70,8 +70,12 @@ Optional shared secret. If set, every inbound request must carry `x-webhook-secr
 
 ```bash
 ntn workers env set LIBRETTO_API_KEY=<libretto-api-key>
+ntn workers env set LIBRETTO_CALLBACK_URL=<insertIntoDatabase-webhook-url>
+ntn workers env set LIBRETTO_CALLBACK_SECRET=<shared-secret>
 ntn workers env set WEBHOOK_SHARED_SECRET=<random-string>
 ```
+
+Set `LIBRETTO_CALLBACK_SECRET` and `WEBHOOK_SHARED_SECRET` to the same value so Libretto callbacks can authenticate with the `insertIntoDatabase` webhook.
 
 Type-check:
 
