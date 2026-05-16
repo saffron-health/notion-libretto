@@ -6,7 +6,7 @@ A collection of Notion Workers. Each worker is an independent deployment unit wi
 
 ```
 workers/
-  insert-into-database/   # Webhook: POST { database_id, data } → insert page
+  libretto/   # Libretto tools plus webhook: POST { database_id, data } → insert page
     src/
     package.json
     tsconfig.json
@@ -16,7 +16,7 @@ workers/
 
 ## Workers
 
-- **[insert-into-database](workers/insert-into-database/README.md)** — Generic webhook that accepts `{ database_id, data }` and writes a new page into any Notion database the worker can access. Handles arbitrary schemas by introspecting the database's properties at request time.
+- **[libretto](workers/libretto/README.md)** — Custom Agent tools for building/running Libretto browser workflows, plus a generic webhook that accepts `{ database_id, data }` and writes a new page into any Notion database the worker can access. Handles arbitrary schemas by introspecting the database's properties at request time.
 
 ## Adding a new worker
 
