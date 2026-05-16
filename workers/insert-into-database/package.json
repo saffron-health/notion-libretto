@@ -1,9 +1,10 @@
 {
-  "name": "notion-libretto",
+  "name": "insert-into-database",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "tsc",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {

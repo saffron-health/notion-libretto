@@ -32,14 +32,27 @@ worker.webhook("insertIntoDatabase", {
         throw new Error("Missing or invalid `data` in payload (must be a JSON object)");
       }
 
+      // Notion's 2025-09-03 API split databases into databases + data sources.
+      // Property schema lives on the data source, not the database.
       const database = (await notion.databases.retrieve({
         database_id: databaseId,
-      })) as unknown as { properties: Schema };
+      })) as unknown as { data_sources?: { id: string }[] };
 
-      const properties = buildProperties(data, database.properties);
+      const dataSourceId = database.data_sources?.[0]?.id;
+      if (!dataSourceId) {
+        throw new Error(`Database ${databaseId} has no data sources`);
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dataSource = (await (notion as any).dataSources.retrieve({
+        data_source_id: dataSourceId,
+      })) as { properties: Schema };
+
+      const properties = buildProperties(data, dataSource.properties);
 
       const created = await notion.pages.create({
-        parent: { database_id: databaseId },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        parent: { data_source_id: dataSourceId } as any,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         properties: properties as any,
       });
