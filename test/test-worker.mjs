@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Smoke-tests the deployed insert-into-database worker against both test
+// Smoke-tests the deployed libretto worker against both test
 // databases, then verifies via the Notion API that each row actually landed.
 //
 // Run from repo root with:
