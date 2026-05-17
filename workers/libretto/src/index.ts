@@ -128,6 +128,28 @@ worker.tool("runWorkflow", {
   },
 });
 
+worker.tool("listWorkflows", {
+  title: "List Libretto Workflows",
+  description:
+    "List every Libretto workflow available on the account, so the agent can pick one to invoke via runWorkflow. Returns deployed workflows plus any builds currently in progress. Libretto's API does not expose each workflow's parameter schema — the caller must know (or infer from the workflow name) what params each workflow expects.",
+  hints: { readOnlyHint: true },
+  schema: j.object({}),
+  execute: async () => callLibretto("/v1/workflows/list", {}),
+});
+
+worker.tool("deleteWorkflow", {
+  title: "Delete Libretto Workflow",
+  description:
+    "Permanently delete a Libretto workflow by name. Destructive and irreversible — the workflow definition will no longer be available to run via runWorkflow. Confirm the workflow name with the user before calling.",
+  schema: j.object({
+    workflow: j
+      .string()
+      .describe("The Libretto workflow name (slug or identifier) to delete."),
+  }),
+  execute: async ({ workflow }) =>
+    callLibretto("/v1/workflows/delete", { workflow }),
+});
+
 worker.webhook("insertIntoDatabase", {
   title: "Insert Into Notion Database",
   description:
