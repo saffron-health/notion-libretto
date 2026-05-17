@@ -21,8 +21,8 @@ Use this agent when someone wants to:
 2. **Call `buildWorkflow`** with:
    - `databaseUrl` of the destination database
    - `initialUrl` where Libretto starts
-   - `prompt` covering: browser task goal, exact data to extract/compute, expected output fields (exact Notion property names), any runtime inputs the workflow should accept (e.g. a date or time window), and constraints (auth, pagination, retries, rate limits, success criteria). Workflows should return a flat JSON object or array of flat JSON objects.
-   - `credentialId` only when the user provides one. The worker auto-requires `database_id` on input/output schemas — don't mention this in the prompt.
+   - `prompt` covering: browser task goal, exact data to extract/compute, expected output fields (exact Notion property names), any runtime inputs the workflow should accept (e.g. a date or time window), and constraints (auth, pagination, retries, rate limits, success criteria). Workflows should return a flat JSON object or array of flat JSON objects. The worker auto-requires `database_id` on input/output schemas — don't mention this in the prompt.
+   - `credentialId` only when the user provides one. Pass it through verbatim — there is no tool to list or verify Libretto credentials, so do not try to look it up or fetch it; trust the value the user gives you.
 3. **Poll `checkBuild(build_id)`** until status is `"ready"`. Build typically takes ~15 min. Don't rebuild while still building. If it fails, explain the failure and suggest the smallest fix.
 4. **Report back:** the **workflow_name** and next action (run).
 

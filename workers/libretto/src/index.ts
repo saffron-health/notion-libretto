@@ -56,7 +56,7 @@ worker.tool("buildWorkflow", {
       .string()
       .nullable()
       .describe(
-        "Optional Libretto credential ID to attach to the build. Only set this when the user explicitly indicates a credential should be used (e.g. they provide an ID or ask the workflow to log in with stored secrets). Use null otherwise.",
+        "Optional Libretto credential ID to attach to the build. Only set this when the user explicitly indicates a credential should be used (e.g. they provide an ID or ask the workflow to log in with stored secrets). Pass the user-provided value through verbatim — this worker does not expose a list/get credentials tool, so do not attempt to validate or look up the ID before calling. Use null otherwise.",
       ),
   }),
   execute: async (
