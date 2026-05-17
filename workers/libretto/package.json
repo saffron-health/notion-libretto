@@ -8,7 +8,8 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@notionhq/workers": "latest"
+    "@notionhq/workers": "latest",
+    "libretto": "^0.6.15"
   },
   "devDependencies": {
     "@types/node": "latest",
