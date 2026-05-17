@@ -9,6 +9,8 @@ All `npm` and `ntn` commands below assume you are inside `workers/libretto/`.
 - `buildWorkflow`: asks Libretto Cloud to build a browser workflow, polls until a deployed workflow is available, runs it once, and optionally creates a recurring schedule.
 - `checkBuild`: checks a Libretto AI workflow build status when a build needs manual follow-up.
 - `runWorkflow`: starts a deployed Libretto workflow job and passes the target Notion database URL or ID in the job params.
+- `listWorkflows`: returns every Libretto workflow on the account (deployed plus in-progress builds), so the agent can pick one before calling `runWorkflow`. Libretto's API does not expose per-workflow parameter schemas — names are the primary hint about what each one accepts.
+- `deleteWorkflow`: permanently deletes a Libretto workflow by name. Destructive and irreversible; confirm the name with the user before invoking.
 
 Before calling `buildWorkflow`, the Custom Agent should create or select the target database, add the properties the browser workflow should populate, and include the expected row shape in the prompt.
 
