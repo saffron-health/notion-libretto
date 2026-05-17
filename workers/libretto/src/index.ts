@@ -167,7 +167,7 @@ worker.tool("runWorkflow", {
     databaseUrl: j
       .string()
       .describe(
-        "The Notion database URL or database ID where workflow results should be written.",
+        "The Notion database URL or database ID this workflow is intended to populate. It must contain properties matching the workflow's output_schema, so pick the database whose schema matches the chosen workflow (visible via listWorkflows).",
       ),
     inputs: j
       .string()
