@@ -22,7 +22,7 @@ type NotionClient = any;
 worker.tool("buildWorkflow", {
   title: "Build Browser Workflow",
   description:
-    "Start building and deploying a Libretto browser workflow. Returns immediately with a build ID; use checkBuild to monitor deployment status. Before calling this tool, create or select the result database and add the properties the workflow should populate.",
+    "Start building and deploying a Libretto browser workflow. Returns immediately with a build ID; use checkBuild to monitor deployment status. Before calling this tool, create or select the result database and add the properties the workflow should populate. If the user indicates the workflow needs a login or other stored secret, pass the credential ID they specify via credentialId so Libretto bakes the credential reference into the workflow definition.",
   schema: j.object({
     databaseUrl: j
       .string()
@@ -33,8 +33,12 @@ worker.tool("buildWorkflow", {
     prompt: j
       .string()
       .describe("The browser workflow instructions Libretto should build. The worker appends the expected output row shape from the target Notion database."),
+    credentialId: j
+      .string()
+      .nullable()
+      .describe("Optional Libretto credential ID to attach to the build. Only set this when the user explicitly indicates a credential should be used (e.g. they provide an ID or ask the workflow to log in with stored secrets). Use null otherwise."),
   }),
-  execute: async ({ databaseUrl, initialUrl, prompt }, { notion }) => {
+  execute: async ({ databaseUrl, initialUrl, prompt, credentialId }, { notion }) => {
     const databaseId = extractNotionDatabaseId(databaseUrl);
     const params = { database_id: databaseId };
     const outputInstruction = await buildDatabaseOutputInstruction(
@@ -45,6 +49,7 @@ worker.tool("buildWorkflow", {
       descriptions: [buildPrompt(prompt, outputInstruction)],
       initial_url: initialUrl,
       params,
+      ...(credentialId ? { credential_id: credentialId } : {}),
     });
     const buildId = getRequiredString(build, "build_id");
 
@@ -342,10 +347,58 @@ worker.tool("listSchedules", {
 worker.tool("listWorkflows", {
   title: "List Libretto Workflows",
   description:
-    "List every Libretto workflow available on the account, so the agent can pick one to invoke via runWorkflow. Returns deployed workflows plus any builds currently in progress. Libretto's API does not expose each workflow's parameter schema — the caller must know (or infer from the workflow name) what params each workflow expects.",
+    "List every Libretto workflow available on the account, so the agent can pick one to invoke via runWorkflow. Returns deployed workflows plus any builds currently in progress. Each deployed workflow is enriched with `input_schema` and `output_schema` (JSON Schema) fetched from /v1/workflows/get; either may be null for legacy workflows built before Zod schemas were supported.",
   hints: { readOnlyHint: true },
   schema: j.object({}),
-  execute: async () => callLibretto("/v1/workflows/list", {}),
+  execute: async () => {
+    const list = await callLibretto("/v1/workflows/list", {});
+
+    if (
+      list === null ||
+      typeof list !== "object" ||
+      Array.isArray(list) ||
+      !Array.isArray((list as { deployed_workflows?: unknown }).deployed_workflows)
+    ) {
+      return list;
+    }
+
+    const deployed = (list as { deployed_workflows: JsonValue[] }).deployed_workflows;
+
+    const enriched = await Promise.all(
+      deployed.map(async (entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+          return entry;
+        }
+        const name = (entry as { name?: unknown }).name;
+        if (typeof name !== "string" || name.length === 0) {
+          return entry;
+        }
+        try {
+          const detail = await callLibretto("/v1/workflows/get", { workflow: name });
+          if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+            const d = detail as { input_schema?: JsonValue; output_schema?: JsonValue };
+            return {
+              ...(entry as JsonObject),
+              input_schema: d.input_schema ?? null,
+              output_schema: d.output_schema ?? null,
+            };
+          }
+          return entry;
+        } catch {
+          return {
+            ...(entry as JsonObject),
+            input_schema: null,
+            output_schema: null,
+          };
+        }
+      }),
+    );
+
+    return {
+      ...(list as JsonObject),
+      deployed_workflows: enriched,
+    };
+  },
 });
 
 worker.tool("deleteWorkflow", {
