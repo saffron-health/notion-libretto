@@ -7,13 +7,14 @@ All `npm` and `ntn` commands below assume you are inside `workers/libretto/`.
 ## Agent tools
 
 - `buildWorkflow`: asks Libretto Cloud to start building a browser workflow and returns a build ID.
+- `editWorkflow`: asks Libretto Cloud to edit an existing deployed workflow in place and returns a build ID.
 - `checkBuild`: checks a Libretto AI workflow build status when a build needs manual follow-up.
 - `runWorkflow`: starts a deployed Libretto workflow job and passes the target Notion database URL or ID in the job params.
 - `createSchedule`: creates a recurring schedule for a deployed Libretto workflow after `checkBuild` returns a `workflow_name`.
 - `listWorkflows`: returns every Libretto workflow on the account (deployed plus in-progress builds), so the agent can pick one before calling `runWorkflow`. Libretto's API does not expose per-workflow parameter schemas — names are the primary hint about what each one accepts.
 - `deleteWorkflow`: permanently deletes a Libretto workflow by name. Destructive and irreversible; confirm the name with the user before invoking.
 
-Before calling `buildWorkflow`, the Custom Agent should create or select the target database, add the properties the browser workflow should populate, and include the expected row shape in the prompt.
+Before calling `buildWorkflow` or `editWorkflow`, the Custom Agent should create or select the target database and add the properties the browser workflow should populate. The worker reads the database schema and appends the expected JSON row shape to the Libretto build/edit instruction.
 
 Example tool input:
 
@@ -21,9 +22,22 @@ Example tool input:
 {
   "databaseUrl": "https://www.notion.so/3c9bab308c7c4808b9c122df75a8e48f",
   "initialUrl": "https://example.com",
-  "prompt": "Build a browser workflow that extracts listings. Output each row with properties matching this Notion database shape: {\"Title\":\"Mid-century chair\",\"URL\":\"https://example.com/listing/123\",\"Price\":240}."
+  "prompt": "Build a browser workflow that extracts listings."
 }
 ```
+
+To edit an existing workflow, pass the workflow name, the target database, an optional starting URL for verification, and the change request:
+
+```json
+{
+  "workflow": "workflow-name-from-checkBuild",
+  "databaseUrl": "https://www.notion.so/3c9bab308c7c4808b9c122df75a8e48f",
+  "initialUrl": "https://example.com",
+  "instruction": "Also capture the listing seller name and write it to the Seller property."
+}
+```
+
+Use `checkBuild` with the returned `build_id`; once it is ready, keep using the same workflow name with `runWorkflow` or `createSchedule`.
 
 Use `createSchedule` with a cron expression for recurring runs after the build is ready:
 

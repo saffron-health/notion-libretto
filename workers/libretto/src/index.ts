@@ -22,7 +22,7 @@ type NotionClient = any;
 worker.tool("buildWorkflow", {
   title: "Build Browser Workflow",
   description:
-    "Start building and deploying a Libretto browser workflow. Returns immediately with a build ID; use checkBuild to monitor deployment status. Before calling this tool, create or select the result database, add the properties the workflow should populate, and include the expected row shape in the prompt.",
+    "Start building and deploying a Libretto browser workflow. Returns immediately with a build ID; use checkBuild to monitor deployment status. Before calling this tool, create or select the result database and add the properties the workflow should populate.",
   schema: j.object({
     databaseUrl: j
       .string()
@@ -32,13 +32,17 @@ worker.tool("buildWorkflow", {
       .describe("The URL where Libretto should start the browser workflow."),
     prompt: j
       .string()
-      .describe("The browser workflow instructions Libretto should build. Include the fields/properties to extract and the expected output row shape that matches the target Notion database."),
+      .describe("The browser workflow instructions Libretto should build. The worker appends the expected output row shape from the target Notion database."),
   }),
-  execute: async ({ databaseUrl, initialUrl, prompt }) => {
+  execute: async ({ databaseUrl, initialUrl, prompt }, { notion }) => {
     const databaseId = extractNotionDatabaseId(databaseUrl);
     const params = { database_id: databaseId };
+    const outputInstruction = await buildDatabaseOutputInstruction(
+      notion,
+      databaseId,
+    );
     const build = await callLibretto("/v1/workflows/build", {
-      descriptions: [buildPrompt(prompt)],
+      descriptions: [buildPrompt(prompt, outputInstruction)],
       initial_url: initialUrl,
       params,
     });
@@ -51,6 +55,50 @@ worker.tool("buildWorkflow", {
       schedule: null,
       message:
         "Workflow build/deployment has started. Use checkBuild with this build_id until it returns a workflow_name, then use runWorkflow to create a job or createSchedule to create a recurring schedule.",
+    };
+  },
+});
+
+worker.tool("editWorkflow", {
+  title: "Edit Browser Workflow",
+  description:
+    "Start editing an existing deployed Libretto browser workflow. Returns immediately with a build ID; use checkBuild to monitor the edit/deployment status. The edit keeps the same workflow name, so future runWorkflow or createSchedule calls use the existing workflow name after checkBuild returns ready.",
+  schema: j.object({
+    workflow: j
+      .string()
+      .describe("The existing deployed Libretto workflow name to edit."),
+    databaseUrl: j
+      .string()
+      .describe("The Notion database URL or database ID where workflow results should continue to be written."),
+    initialUrl: j
+      .string()
+      .nullable()
+      .describe("Optional URL where Libretto should start the edit verification. Use null if the existing workflow should decide where to start."),
+    instruction: j
+      .string()
+      .describe("The requested change to make to the existing browser workflow."),
+  }),
+  execute: async ({ workflow, databaseUrl, initialUrl, instruction }, { notion }) => {
+    const databaseId = extractNotionDatabaseId(databaseUrl);
+    const outputInstruction = await buildDatabaseOutputInstruction(
+      notion,
+      databaseId,
+    );
+    const edit = await callLibretto("/v1/workflows/edit", {
+      workflow,
+      instruction: buildEditInstruction(instruction, outputInstruction),
+      ...(initialUrl ? { initial_url: initialUrl } : {}),
+      params: { database_id: databaseId },
+    });
+    const buildId = getRequiredString(edit, "build_id");
+
+    return {
+      edit,
+      build_id: buildId,
+      workflow,
+      database_id: databaseId,
+      message:
+        "Workflow edit/deployment has started. Use checkBuild with this build_id until it returns ready; the edited workflow keeps the same workflow name for runWorkflow or createSchedule.",
     };
   },
 });
@@ -313,23 +361,20 @@ function getCallbackSecret() {
   return process.env.LIBRETTO_CALLBACK_SECRET ?? process.env.WEBHOOK_SHARED_SECRET;
 }
 
-function buildPrompt(prompt: string) {
+async function buildDatabaseOutputInstruction(
+  notion: NotionClient,
+  databaseId: string,
+) {
+  const { schema } = await retrieveDataSource(notion, databaseId);
+  const example = buildOutputExample(schema);
+
   return [
-    prompt,
-    "",
-    "Return the scraped data as a flat JSON object or an array of flat JSON objects.",
-    "Use keys that exactly match the target Notion database properties.",
-    "Do not call Notion directly. Return the result data only; this worker's webhook receives the Libretto job callback and writes rows to Notion.",
+    "Output should be in this shape:",
+    JSON.stringify(example, null, 2),
   ].join("\n");
 }
 
-async function insertRow(
-  notion: NotionClient,
-  databaseId: string,
-  data: Record<string, unknown>,
-) {
-  // Notion's 2025-09-03 API split databases into databases + data sources.
-  // Property schema lives on the data source, not the database.
+async function retrieveDataSource(notion: NotionClient, databaseId: string) {
   const database = (await notion.databases.retrieve({
     database_id: databaseId,
   })) as unknown as { data_sources?: { id: string }[] };
@@ -343,10 +388,83 @@ async function insertRow(
     data_source_id: dataSourceId,
   })) as { properties: Schema };
 
-  const properties = buildProperties(data, dataSource.properties);
+  return { id: dataSourceId, schema: dataSource.properties };
+}
+
+function buildOutputExample(schema: Schema): Record<string, unknown> {
+  const example: Record<string, unknown> = {};
+  for (const [name, property] of Object.entries(schema)) {
+    const value = exampleValueForProperty(property);
+    if (value !== undefined) {
+      example[name] = value;
+    }
+  }
+  return example;
+}
+
+function exampleValueForProperty(property: SchemaProperty) {
+  switch (property.type) {
+    case "title":
+    case "rich_text":
+      return "string";
+    case "number":
+      return 0;
+    case "checkbox":
+      return true;
+    case "select":
+    case "status":
+      return "Option";
+    case "multi_select":
+      return ["Option"];
+    case "date":
+      return "2026-05-17";
+    case "url":
+      return "https://example.com";
+    case "email":
+      return "name@example.com";
+    case "phone_number":
+      return "+1 555 555 5555";
+    default:
+      return undefined;
+  }
+}
+
+function buildPrompt(prompt: string, outputInstruction: string) {
+  return [
+    prompt,
+    "",
+    outputInstruction,
+    "",
+    "Return the scraped data as a flat JSON object or an array of flat JSON objects.",
+    "Use keys that exactly match the target Notion database properties.",
+    "Do not call Notion directly. Return the result data only; this worker's webhook receives the Libretto job callback and writes rows to Notion.",
+  ].join("\n");
+}
+
+function buildEditInstruction(instruction: string, outputInstruction: string) {
+  return [
+    instruction,
+    "",
+    outputInstruction,
+    "",
+    "Keep the existing workflow name unchanged.",
+    "Keep the workflow returning a flat JSON object or an array of flat JSON objects.",
+    "Use keys that exactly match the target Notion database properties.",
+    "Do not call Notion directly. Return the result data only; this worker's webhook receives the Libretto job callback and writes rows to Notion.",
+  ].join("\n");
+}
+
+async function insertRow(
+  notion: NotionClient,
+  databaseId: string,
+  data: Record<string, unknown>,
+) {
+  const dataSource = await retrieveDataSource(notion, databaseId);
+
+  const properties = buildProperties(data, dataSource.schema);
 
   const created = await notion.pages.create({
-    parent: { data_source_id: dataSourceId },
+    parent: { data_source_id: dataSource.id },
     properties,
   });
 
