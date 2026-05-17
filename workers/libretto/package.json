@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "deploy": "node --env-file=../../.env ./scripts/deploy.mjs",
+    "env:push": "node --env-file=../../.env ./scripts/env-push.mjs"
   },
   "dependencies": {
     "@notionhq/workers": "latest",
