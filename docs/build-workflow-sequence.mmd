@@ -15,7 +15,7 @@ sequenceDiagram
   Worker->>Notion: retrieve database schema
   Notion-->>Worker: database properties
 
-  Worker->>Worker: append JSON output instructions to prompt
+  Worker->>Worker: append JSON output instructions to prompt<br/>(require database_id in input + output schema)
 
   Worker->>Libretto: POST /v1/workflows/build
   Note over Worker,Libretto: Sends prompt, initial_url,<br/>params.database_id,<br/>and credential_id if provided

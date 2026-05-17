@@ -14,12 +14,13 @@ sequenceDiagram
   Libretto-->>Worker: input_schema, output_schema per workflow
   Worker-->>NotionAgent: workflows + input/output schemas
 
-  NotionAgent-->>User: confirm inputs/outputs
-  User-->>NotionAgent: confirmed
+  NotionAgent-->>User: confirm inputs/outputs (per input_schema)
+  User-->>NotionAgent: confirmed input values
 
-  NotionAgent->>Worker: call runWorkflow(workflow_name, inputs, databaseUrl)
+  NotionAgent->>NotionAgent: pick databaseUrl from Workflows Notion page
+  NotionAgent->>Worker: call runWorkflow(workflow_name, databaseUrl, inputs?)
   Worker->>Libretto: POST /v1/jobs/create
-  Note over Worker,Libretto: params.database_id +<br/>callback URL/secret
+  Note over Worker,Libretto: params = { database_id,<br/>...parsed inputs } +<br/>callback URL/secret
   Libretto-->>Worker: job_id
   Worker-->>NotionAgent: job_id
 

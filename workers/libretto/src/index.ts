@@ -8,9 +8,24 @@ const worker = new Worker();
 export default worker;
 
 const BUILD_READY_STATUSES = new Set(["ready"]);
-const BUILD_FAILED_STATUSES = new Set(["failed", "error", "cancelled", "canceled"]);
-const JOB_DONE_STATUSES = new Set(["completed", "complete", "succeeded", "success"]);
-const JOB_FAILED_STATUSES = new Set(["failed", "error", "cancelled", "canceled"]);
+const BUILD_FAILED_STATUSES = new Set([
+  "failed",
+  "error",
+  "cancelled",
+  "canceled",
+]);
+const JOB_DONE_STATUSES = new Set([
+  "completed",
+  "complete",
+  "succeeded",
+  "success",
+]);
+const JOB_FAILED_STATUSES = new Set([
+  "failed",
+  "error",
+  "cancelled",
+  "canceled",
+]);
 
 type SchemaProperty = { type: string; [key: string]: unknown };
 type Schema = Record<string, SchemaProperty>;
@@ -26,19 +41,28 @@ worker.tool("buildWorkflow", {
   schema: j.object({
     databaseUrl: j
       .string()
-      .describe("The Notion database URL or database ID where workflow results should be written. The database must already exist and contain the properties the workflow should populate."),
+      .describe(
+        "The Notion database URL or database ID where workflow results should be written. The database must already exist and contain the properties the workflow should populate.",
+      ),
     initialUrl: j
       .string()
       .describe("The URL where Libretto should start the browser workflow."),
     prompt: j
       .string()
-      .describe("The browser workflow instructions Libretto should build. The worker appends the expected output row shape from the target Notion database."),
+      .describe(
+        "The browser workflow instructions Libretto should build. The worker appends the expected output row shape from the target Notion database.",
+      ),
     credentialId: j
       .string()
       .nullable()
-      .describe("Optional Libretto credential ID to attach to the build. Only set this when the user explicitly indicates a credential should be used (e.g. they provide an ID or ask the workflow to log in with stored secrets). Use null otherwise."),
+      .describe(
+        "Optional Libretto credential ID to attach to the build. Only set this when the user explicitly indicates a credential should be used (e.g. they provide an ID or ask the workflow to log in with stored secrets). Use null otherwise.",
+      ),
   }),
-  execute: async ({ databaseUrl, initialUrl, prompt, credentialId }, { notion }) => {
+  execute: async (
+    { databaseUrl, initialUrl, prompt, credentialId },
+    { notion },
+  ) => {
     const databaseId = extractNotionDatabaseId(databaseUrl);
     const params = { database_id: databaseId };
     const outputInstruction = await buildDatabaseOutputInstruction(
@@ -74,16 +98,25 @@ worker.tool("editWorkflow", {
       .describe("The existing deployed Libretto workflow name to edit."),
     databaseUrl: j
       .string()
-      .describe("The Notion database URL or database ID where workflow results should continue to be written."),
+      .describe(
+        "The Notion database URL or database ID where workflow results should continue to be written.",
+      ),
     initialUrl: j
       .string()
       .nullable()
-      .describe("Optional URL where Libretto should start the edit verification. Use null if the existing workflow should decide where to start."),
+      .describe(
+        "Optional URL where Libretto should start the edit verification. Use null if the existing workflow should decide where to start.",
+      ),
     instruction: j
       .string()
-      .describe("The requested change to make to the existing browser workflow."),
+      .describe(
+        "The requested change to make to the existing browser workflow.",
+      ),
   }),
-  execute: async ({ workflow, databaseUrl, initialUrl, instruction }, { notion }) => {
+  execute: async (
+    { workflow, databaseUrl, initialUrl, instruction },
+    { notion },
+  ) => {
     const databaseId = extractNotionDatabaseId(databaseUrl);
     const outputInstruction = await buildDatabaseOutputInstruction(
       notion,
@@ -128,16 +161,42 @@ worker.tool("checkBuild", {
 worker.tool("runWorkflow", {
   title: "Run Libretto Workflow",
   description:
-    "Create a one-off job for a deployed Libretto browser workflow. The workflow returns JSON results to Libretto; if callback env vars are configured, Libretto posts completion to this worker's webhook, which writes rows to Notion.",
+    "Create a one-off job for a deployed Libretto browser workflow. The workflow returns JSON results to Libretto; if callback env vars are configured, Libretto posts completion to this worker's webhook, which writes rows to Notion. To pass runtime inputs declared in the workflow's input_schema (see listWorkflows), pass them as a JSON-encoded object via `inputs`; `database_id` is always added automatically from `databaseUrl` and any matching key in `inputs` is ignored.",
   schema: j.object({
     workflow: j.string().describe("The deployed Libretto workflow name."),
     databaseUrl: j
       .string()
-      .describe("The Notion database URL or database ID where workflow results should be written."),
+      .describe(
+        "The Notion database URL or database ID where workflow results should be written.",
+      ),
+    inputs: j
+      .string()
+      .nullable()
+      .describe(
+        "Optional JSON-encoded object of runtime inputs declared by the workflow's input_schema (visible via listWorkflows). Use null when the workflow takes no runtime inputs other than database_id.",
+      ),
   }),
-  execute: async ({ workflow, databaseUrl }) => {
+  execute: async ({ workflow, databaseUrl, inputs }) => {
     const databaseId = extractNotionDatabaseId(databaseUrl);
-    const params = { database_id: databaseId };
+    const params: JsonObject = {};
+    if (inputs) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(inputs);
+      } catch (err) {
+        throw new Error(
+          `runWorkflow: \`inputs\` must be a JSON-encoded object: ${(err as Error).message}`,
+        );
+      }
+      if (!isPlainObject(parsed)) {
+        throw new Error("runWorkflow: `inputs` must decode to a JSON object");
+      }
+      for (const [key, value] of Object.entries(parsed)) {
+        if (key === "database_id") continue;
+        params[key] = value as JsonValue;
+      }
+    }
+    params.database_id = databaseId;
     const callbackOptions = getCallbackOptions();
     const run = await createJob(workflow, params, callbackOptions);
     const jobId = getRequiredString(run, "job_id");
@@ -148,10 +207,9 @@ worker.tool("runWorkflow", {
       job_id: jobId,
       database_id: databaseId,
       callback_enabled: callbackEnabled,
-      message:
-        callbackEnabled
-          ? "Libretto job has started with webhook delivery enabled. The workflow should return JSON rows; Libretto will call this worker's webhook, and the worker will write rows to Notion. Use checkRun only to monitor status."
-          : "Libretto job has started without webhook delivery because callback env vars are not configured. Use checkRun to monitor status; results will be returned but not automatically inserted into Notion.",
+      message: callbackEnabled
+        ? "Libretto job has started with webhook delivery enabled. The workflow should return JSON rows; Libretto will call this worker's webhook, and the worker will write rows to Notion. Use checkRun only to monitor status."
+        : "Libretto job has started without webhook delivery because callback env vars are not configured. Use checkRun to monitor status; results will be returned but not automatically inserted into Notion.",
     };
   },
 });
@@ -164,7 +222,9 @@ worker.tool("checkRun", {
     jobId: j.string().describe("The Libretto job ID returned by runWorkflow."),
     databaseUrl: j
       .string()
-      .describe("The Notion database URL or database ID where workflow results should be written."),
+      .describe(
+        "The Notion database URL or database ID where workflow results should be written.",
+      ),
   }),
   execute: async ({ jobId, databaseUrl }, { notion }) => {
     const databaseId = extractNotionDatabaseId(databaseUrl);
@@ -209,31 +269,45 @@ worker.tool("setSchedule", {
   schema: j.object({
     mode: j
       .enum("create", "update", "delete")
-      .describe("Whether to create a new schedule, update an existing schedule, or delete an existing schedule."),
+      .describe(
+        "Whether to create a new schedule, update an existing schedule, or delete an existing schedule.",
+      ),
     scheduleId: j
       .string()
       .nullable()
-      .describe("The schedule ID to update or delete. Use null when mode is create."),
+      .describe(
+        "The schedule ID to update or delete. Use null when mode is create.",
+      ),
     workflow: j
       .string()
       .nullable()
-      .describe("The deployed Libretto workflow name. Required when mode is create; ignored for update/delete."),
+      .describe(
+        "The deployed Libretto workflow name. Required when mode is create; ignored for update/delete.",
+      ),
     databaseUrl: j
       .string()
       .nullable()
-      .describe("The Notion database URL or database ID to include in scheduled job params. Required for create; optional for update; use null to leave params unchanged when updating."),
+      .describe(
+        "The Notion database URL or database ID to include in scheduled job params. Required for create; optional for update; use null to leave params unchanged when updating.",
+      ),
     cron: j
       .string()
       .nullable()
-      .describe("5-field cron expression for recurring Libretto runs. Required for create; optional for update; use null to leave unchanged when updating."),
+      .describe(
+        "5-field cron expression for recurring Libretto runs. Required for create; optional for update; use null to leave unchanged when updating.",
+      ),
     timezone: j
       .string()
       .nullable()
-      .describe("IANA timezone for the cron expression, such as UTC or America/Los_Angeles. Use null to default to UTC on create or leave unchanged on update."),
+      .describe(
+        "IANA timezone for the cron expression, such as UTC or America/Los_Angeles. Use null to default to UTC on create or leave unchanged on update.",
+      ),
     enabled: j
       .boolean()
       .nullable()
-      .describe("Whether the schedule should be enabled. Use null to default to true on create or leave unchanged on update."),
+      .describe(
+        "Whether the schedule should be enabled. Use null to default to true on create or leave unchanged on update.",
+      ),
   }),
   execute: async ({
     mode,
@@ -324,15 +398,21 @@ worker.tool("listSchedules", {
     workflow: j
       .string()
       .nullable()
-      .describe("Optional deployed workflow name to filter by. Use null to list schedules for all workflows."),
+      .describe(
+        "Optional deployed workflow name to filter by. Use null to list schedules for all workflows.",
+      ),
     enabled: j
       .boolean()
       .nullable()
-      .describe("Optional enabled-state filter. Use null to include both enabled and disabled schedules."),
+      .describe(
+        "Optional enabled-state filter. Use null to include both enabled and disabled schedules.",
+      ),
     limit: j
       .integer()
       .nullable()
-      .describe("Optional maximum number of schedules to return. Use null for the Libretto default."),
+      .describe(
+        "Optional maximum number of schedules to return. Use null for the Libretto default.",
+      ),
   }),
   execute: async ({ workflow, enabled, limit }) => {
     const query: JsonObject = {};
@@ -357,12 +437,15 @@ worker.tool("listWorkflows", {
       list === null ||
       typeof list !== "object" ||
       Array.isArray(list) ||
-      !Array.isArray((list as { deployed_workflows?: unknown }).deployed_workflows)
+      !Array.isArray(
+        (list as { deployed_workflows?: unknown }).deployed_workflows,
+      )
     ) {
       return list;
     }
 
-    const deployed = (list as { deployed_workflows: JsonValue[] }).deployed_workflows;
+    const deployed = (list as { deployed_workflows: JsonValue[] })
+      .deployed_workflows;
 
     const enriched = await Promise.all(
       deployed.map(async (entry) => {
@@ -374,9 +457,14 @@ worker.tool("listWorkflows", {
           return entry;
         }
         try {
-          const detail = await callLibretto("/v1/workflows/get", { workflow: name });
+          const detail = await callLibretto("/v1/workflows/get", {
+            workflow: name,
+          });
           if (detail && typeof detail === "object" && !Array.isArray(detail)) {
-            const d = detail as { input_schema?: JsonValue; output_schema?: JsonValue };
+            const d = detail as {
+              input_schema?: JsonValue;
+              output_schema?: JsonValue;
+            };
             return {
               ...(entry as JsonObject),
               input_schema: d.input_schema ?? null,
@@ -441,7 +529,9 @@ worker.webhook("insertIntoDatabase", {
         throw new Error("Missing or invalid `database_id` in payload");
       }
       if (!isPlainObject(data)) {
-        throw new Error("Missing or invalid `data` in payload (must be a JSON object)");
+        throw new Error(
+          "Missing or invalid `data` in payload (must be a JSON object)",
+        );
       }
 
       await insertRow(notion, databaseId, data);
@@ -484,7 +574,9 @@ async function handleLibrettoCallback(
 }
 
 function isLibrettoCallback(payload: Record<string, unknown>) {
-  return typeof payload.job_id === "string" && typeof payload.workflow === "string";
+  return (
+    typeof payload.job_id === "string" && typeof payload.workflow === "string"
+  );
 }
 
 async function createJob(
@@ -520,7 +612,9 @@ function getCallbackOptions(): Record<string, string> {
 }
 
 function getCallbackSecret() {
-  return process.env.LIBRETTO_CALLBACK_SECRET ?? process.env.WEBHOOK_SHARED_SECRET;
+  return (
+    process.env.LIBRETTO_CALLBACK_SECRET ?? process.env.WEBHOOK_SHARED_SECRET
+  );
 }
 
 async function buildDatabaseOutputInstruction(
@@ -528,9 +622,12 @@ async function buildDatabaseOutputInstruction(
   databaseId: string,
 ) {
   const { schema } = await retrieveDataSource(notion, databaseId);
-  const example = buildOutputExample(schema);
+  const example = { database_id: "string", ...buildOutputExample(schema) };
 
   return [
+    "The workflow's input_schema MUST declare `database_id` (string, required). Treat it as an opaque routing identifier — do not use it in any workflow step.",
+    "The workflow's output_schema MUST declare `database_id` (string, required) on every output row. Echo the input `database_id` value through into every output row.",
+    "",
     "Output should be in this shape:",
     JSON.stringify(example, null, 2),
   ].join("\n");
@@ -672,7 +769,9 @@ function verifyLibrettoSignature(
   const expected = createHmac("sha256", secret)
     .update(JSON.stringify(payload))
     .digest("hex");
-  const signature = provided.includes("=") ? provided.split("=").at(-1)! : provided;
+  const signature = provided.includes("=")
+    ? provided.split("=").at(-1)!
+    : provided;
   const expectedBuffer = Buffer.from(expected, "hex");
   const actualBuffer = Buffer.from(signature, "hex");
 
@@ -741,7 +840,10 @@ function buildPropertyValue(type: string, value: unknown): unknown | undefined {
       const names = Array.isArray(value)
         ? value.map(asString)
         : typeof value === "string"
-          ? value.split(",").map((s) => s.trim()).filter(Boolean)
+          ? value
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean)
           : [asString(value)];
       return { multi_select: names.map((name) => ({ name })) };
     }
@@ -860,7 +962,10 @@ function getRequiredString(value: unknown, key: string): string {
   return value[key]!;
 }
 
-function hasString(value: unknown, key: string): value is Record<string, string> {
+function hasString(
+  value: unknown,
+  key: string,
+): value is Record<string, string> {
   if (value === null || typeof value !== "object") {
     return false;
   }
