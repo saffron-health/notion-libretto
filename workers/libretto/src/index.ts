@@ -54,7 +54,7 @@ worker.tool("buildWorkflow", {
       run: null,
       schedule: null,
       message:
-        "Workflow build/deployment has started. Use checkBuild with this build_id until it returns a workflow_name, then use runWorkflow to create a job or createSchedule to create a recurring schedule.",
+        "Workflow build/deployment has started. Use checkBuild with this build_id until it returns a workflow_name, then use runWorkflow to create a job or setSchedule to create, update, or delete a recurring schedule.",
     };
   },
 });
@@ -62,7 +62,7 @@ worker.tool("buildWorkflow", {
 worker.tool("editWorkflow", {
   title: "Edit Browser Workflow",
   description:
-    "Start editing an existing deployed Libretto browser workflow. Returns immediately with a build ID; use checkBuild to monitor the edit/deployment status. The edit keeps the same workflow name, so future runWorkflow or createSchedule calls use the existing workflow name after checkBuild returns ready.",
+    "Start editing an existing deployed Libretto browser workflow. Returns immediately with a build ID; use checkBuild to monitor the edit/deployment status. The edit keeps the same workflow name, so future runWorkflow or setSchedule calls use the existing workflow name after checkBuild returns ready.",
   schema: j.object({
     workflow: j
       .string()
@@ -98,7 +98,7 @@ worker.tool("editWorkflow", {
       workflow,
       database_id: databaseId,
       message:
-        "Workflow edit/deployment has started. Use checkBuild with this build_id until it returns ready; the edited workflow keeps the same workflow name for runWorkflow or createSchedule.",
+        "Workflow edit/deployment has started. Use checkBuild with this build_id until it returns ready; the edited workflow keeps the same workflow name for runWorkflow or setSchedule.",
     };
   },
 });
@@ -197,36 +197,145 @@ worker.tool("checkRun", {
   },
 });
 
-worker.tool("createSchedule", {
-  title: "Create Libretto Workflow Schedule",
+worker.tool("setSchedule", {
+  title: "Set Libretto Workflow Schedule",
   description:
-    "Create a recurring schedule for a deployed Libretto browser workflow. Use this only after checkBuild has returned a workflow_name.",
+    "Create, update, or delete a recurring schedule for a deployed Libretto browser workflow. Use create only after checkBuild has returned a workflow_name. Use listSchedules first when you need a schedule ID to update or delete.",
   schema: j.object({
-    workflow: j.string().describe("The deployed Libretto workflow name."),
+    mode: j
+      .enum("create", "update", "delete")
+      .describe("Whether to create a new schedule, update an existing schedule, or delete an existing schedule."),
+    scheduleId: j
+      .string()
+      .nullable()
+      .describe("The schedule ID to update or delete. Use null when mode is create."),
+    workflow: j
+      .string()
+      .nullable()
+      .describe("The deployed Libretto workflow name. Required when mode is create; ignored for update/delete."),
     databaseUrl: j
       .string()
-      .describe("The Notion database URL or database ID to include in scheduled job params."),
-    cron: j.string().describe("Cron expression for recurring Libretto runs."),
+      .nullable()
+      .describe("The Notion database URL or database ID to include in scheduled job params. Required for create; optional for update; use null to leave params unchanged when updating."),
+    cron: j
+      .string()
+      .nullable()
+      .describe("5-field cron expression for recurring Libretto runs. Required for create; optional for update; use null to leave unchanged when updating."),
+    timezone: j
+      .string()
+      .nullable()
+      .describe("IANA timezone for the cron expression, such as UTC or America/Los_Angeles. Use null to default to UTC on create or leave unchanged on update."),
+    enabled: j
+      .boolean()
+      .nullable()
+      .describe("Whether the schedule should be enabled. Use null to default to true on create or leave unchanged on update."),
   }),
-  execute: async ({ workflow, databaseUrl, cron }) => {
+  execute: async ({
+    mode,
+    scheduleId,
+    workflow,
+    databaseUrl,
+    cron,
+    timezone,
+    enabled,
+  }) => {
+    if (mode === "delete") {
+      if (!scheduleId) {
+        throw new Error("scheduleId is required when mode is delete");
+      }
+
+      const deleted = await callLibretto("/v1/schedules/delete", {
+        id: scheduleId,
+      });
+
+      return {
+        deleted,
+        schedule_id: scheduleId,
+        message: `Schedule ${scheduleId} deleted.`,
+      };
+    }
+
+    if (mode === "update") {
+      if (!scheduleId) {
+        throw new Error("scheduleId is required when mode is update");
+      }
+
+      const patch: JsonObject = { id: scheduleId };
+      if (databaseUrl) {
+        patch.params = { database_id: extractNotionDatabaseId(databaseUrl) };
+      }
+      if (cron) patch.cron_expr = cron;
+      if (timezone) patch.timezone = timezone;
+      if (enabled !== null) patch.enabled = enabled;
+
+      const updated = await callLibretto("/v1/schedules/update", patch);
+
+      return {
+        updated,
+        schedule_id: scheduleId,
+        message: `Schedule ${scheduleId} updated.`,
+      };
+    }
+
+    if (!workflow) {
+      throw new Error("workflow is required when mode is create");
+    }
+    if (!databaseUrl) {
+      throw new Error("databaseUrl is required when mode is create");
+    }
+    if (!cron) {
+      throw new Error("cron is required when mode is create");
+    }
+
     const databaseId = extractNotionDatabaseId(databaseUrl);
     const callbackOptions = getCallbackOptions();
-    const schedule = await callLibretto("/v1/schedules/create", {
+    const created = await callLibretto("/v1/schedules/create", {
       workflow,
       params: { database_id: databaseId },
       cron_expr: cron,
+      timezone: timezone ?? "UTC",
+      enabled: enabled ?? true,
       ...callbackOptions,
     });
 
     return {
-      schedule,
+      created,
       database_id: databaseId,
       callback_enabled: Object.keys(callbackOptions).length > 0,
       message:
         Object.keys(callbackOptions).length > 0
-          ? "Schedule created with callback delivery enabled."
+          ? "Schedule created with callback delivery enabled. Use listSchedules to find the schedule ID before future updates or deletion."
           : "Schedule created without callback delivery. Set callback env vars if scheduled runs should write results into Notion automatically.",
     };
+  },
+});
+
+worker.tool("listSchedules", {
+  title: "List Libretto Workflow Schedules",
+  description:
+    "List recurring Libretto workflow schedules, optionally filtered by workflow name or enabled state. Use this to find schedule IDs before calling setSchedule in update or delete mode.",
+  hints: { readOnlyHint: true },
+  schema: j.object({
+    workflow: j
+      .string()
+      .nullable()
+      .describe("Optional deployed workflow name to filter by. Use null to list schedules for all workflows."),
+    enabled: j
+      .boolean()
+      .nullable()
+      .describe("Optional enabled-state filter. Use null to include both enabled and disabled schedules."),
+    limit: j
+      .integer()
+      .nullable()
+      .describe("Optional maximum number of schedules to return. Use null for the Libretto default."),
+  }),
+  execute: async ({ workflow, enabled, limit }) => {
+    const query: JsonObject = {};
+    if (workflow) query.workflow = workflow;
+    if (enabled !== null) query.enabled = enabled;
+    if (limit !== null) query.limit = limit;
+
+    return callLibretto("/v1/schedules/list", query);
   },
 });
 
@@ -663,7 +772,7 @@ function buildStatusMessage(
       : "";
 
   if (BUILD_READY_STATUSES.has(lowerStatus)) {
-    return `Workflow build is ready. Use workflow_name "${workflowName}" with runWorkflow or createSchedule.${stepsSummary}`;
+    return `Workflow build is ready. Use workflow_name "${workflowName}" with runWorkflow or setSchedule.${stepsSummary}`;
   }
 
   if (BUILD_FAILED_STATUSES.has(lowerStatus)) {

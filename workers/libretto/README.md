@@ -10,7 +10,8 @@ All `npm` and `ntn` commands below assume you are inside `workers/libretto/`.
 - `editWorkflow`: asks Libretto Cloud to edit an existing deployed workflow in place and returns a build ID.
 - `checkBuild`: checks a Libretto AI workflow build status when a build needs manual follow-up.
 - `runWorkflow`: starts a deployed Libretto workflow job and passes the target Notion database URL or ID in the job params.
-- `createSchedule`: creates a recurring schedule for a deployed Libretto workflow after `checkBuild` returns a `workflow_name`.
+- `setSchedule`: creates, updates, or deletes a recurring schedule for a deployed Libretto workflow after `checkBuild` returns a `workflow_name`.
+- `listSchedules`: lists recurring workflow schedules and returns schedule IDs for later updates/deletion.
 - `listWorkflows`: returns every Libretto workflow on the account (deployed plus in-progress builds), so the agent can pick one before calling `runWorkflow`. Libretto's API does not expose per-workflow parameter schemas — names are the primary hint about what each one accepts.
 - `deleteWorkflow`: permanently deletes a Libretto workflow by name. Destructive and irreversible; confirm the name with the user before invoking.
 
@@ -37,15 +38,47 @@ To edit an existing workflow, pass the workflow name, the target database, an op
 }
 ```
 
-Use `checkBuild` with the returned `build_id`; once it is ready, keep using the same workflow name with `runWorkflow` or `createSchedule`.
+Use `checkBuild` with the returned `build_id`; once it is ready, keep using the same workflow name with `runWorkflow` or `setSchedule`.
 
-Use `createSchedule` with a cron expression for recurring runs after the build is ready:
+Use `setSchedule` with a cron expression for recurring runs after the build is ready:
 
 ```json
 {
+  "mode": "create",
+  "scheduleId": null,
   "workflow": "workflow-name-from-checkBuild",
   "databaseUrl": "https://www.notion.so/3c9bab308c7c4808b9c122df75a8e48f",
-  "cron": "0 */6 * * *"
+  "cron": "0 */6 * * *",
+  "timezone": "UTC",
+  "enabled": true
+}
+```
+
+To change an existing schedule, call `listSchedules` first to find the schedule ID, then call:
+
+```json
+{
+  "mode": "update",
+  "scheduleId": "schedule-uuid",
+  "workflow": null,
+  "databaseUrl": null,
+  "cron": "0 9 * * 1-5",
+  "timezone": "America/Los_Angeles",
+  "enabled": true
+}
+```
+
+To delete a schedule:
+
+```json
+{
+  "mode": "delete",
+  "scheduleId": "schedule-uuid",
+  "workflow": null,
+  "databaseUrl": null,
+  "cron": null,
+  "timezone": null,
+  "enabled": null
 }
 ```
 
