@@ -1,21 +1,28 @@
 import { WebhookVerificationError, Worker } from "@notionhq/workers";
 import { j } from "@notionhq/workers/schema-builder";
+import { createHmac, timingSafeEqual } from "node:crypto";
 
-import { callLibretto, parseJsonObject } from "./libretto.js";
+import { callLibretto, type JsonObject, type JsonValue } from "./libretto.js";
 
 const worker = new Worker();
 export default worker;
 
-const BUILD_POLL_ATTEMPTS = 8;
-const BUILD_POLL_INTERVAL_MS = 1_500;
+const BUILD_READY_STATUSES = new Set(["ready"]);
+const BUILD_FAILED_STATUSES = new Set(["failed", "error", "cancelled", "canceled"]);
+const JOB_DONE_STATUSES = new Set(["completed", "complete", "succeeded", "success"]);
+const JOB_FAILED_STATUSES = new Set(["failed", "error", "cancelled", "canceled"]);
 
 type SchemaProperty = { type: string; [key: string]: unknown };
 type Schema = Record<string, SchemaProperty>;
+// The Workers SDK exposes a Notion client, but its generated type is not
+// currently exported in a reusable form.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type NotionClient = any;
 
 worker.tool("buildWorkflow", {
   title: "Build Browser Workflow",
   description:
-    "Build a Libretto browser workflow, wait for the deployed workflow, run it once, and optionally schedule recurring runs. Before calling this tool, create or select the result database, add the properties the workflow should populate, and include the expected row shape in the prompt.",
+    "Start building and deploying a Libretto browser workflow. Returns immediately with a build ID; use checkBuild to monitor deployment status. Before calling this tool, create or select the result database, add the properties the workflow should populate, and include the expected row shape in the prompt.",
   schema: j.object({
     databaseUrl: j
       .string()
@@ -26,53 +33,24 @@ worker.tool("buildWorkflow", {
     prompt: j
       .string()
       .describe("The browser workflow instructions Libretto should build. Include the fields/properties to extract and the expected output row shape that matches the target Notion database."),
-    schedule: j
-      .string()
-      .describe("Cron expression for recurring Libretto runs, or an empty string for no schedule."),
   }),
-  execute: async ({ databaseUrl, initialUrl, prompt, schedule }) => {
+  execute: async ({ databaseUrl, initialUrl, prompt }) => {
     const databaseId = extractNotionDatabaseId(databaseUrl);
     const params = { database_id: databaseId };
     const build = await callLibretto("/v1/workflows/build", {
-      descriptions: [prompt],
+      descriptions: [buildPrompt(prompt)],
       initial_url: initialUrl,
       params,
     });
     const buildId = getRequiredString(build, "build_id");
-    const buildStatus = await waitForBuild(buildId);
-
-    if (!hasString(buildStatus, "workflow_name")) {
-      return {
-        build,
-        build_status: buildStatus,
-        run: null,
-        schedule: null,
-        message:
-          "Workflow build is still in progress. Use checkBuild with the build_id to monitor status.",
-      };
-    }
-
-    const workflow = getRequiredString(buildStatus, "workflow_name");
-    const run = await callLibretto("/v1/jobs/create", {
-      workflow,
-      params,
-      ...getLibrettoCallbackConfig(),
-    });
-    const cronExpr = schedule.trim();
-    const scheduled = cronExpr
-      ? await callLibretto("/v1/schedules/create", {
-          workflow,
-          params,
-          cron_expr: cronExpr,
-          ...getLibrettoCallbackConfig(),
-        })
-      : null;
 
     return {
       build,
-      build_status: buildStatus,
-      run,
-      schedule: scheduled,
+      build_id: buildId,
+      run: null,
+      schedule: null,
+      message:
+        "Workflow build/deployment has started. Use checkBuild with this build_id until it returns a workflow_name, then use runWorkflow to create a job or createSchedule to create a recurring schedule.",
     };
   },
 });
@@ -80,51 +58,127 @@ worker.tool("buildWorkflow", {
 worker.tool("checkBuild", {
   title: "Check Browser Workflow Build",
   description:
-    "Check the status of a Libretto browser workflow build by build ID. Use this when buildWorkflow returns a pending or in-progress build instead of a completed workflow.",
+    "Check the status of a Libretto browser workflow build by build ID. Returns the build status, deployed workflow name when ready, and attempted_steps describing what the builder has tried so far.",
   schema: j.object({
     buildId: j.string().describe("The Libretto workflow build ID."),
   }),
   hints: { readOnlyHint: true },
-  execute: async ({ buildId }) =>
-    callLibretto("/v1/workflows/buildStatus", { build_id: buildId }),
+  execute: async ({ buildId }) => {
+    const build = await callLibretto("/v1/workflows/buildStatus", {
+      build_id: buildId,
+    });
+
+    return formatBuildStatus(build, buildId);
+  },
 });
 
 worker.tool("runWorkflow", {
   title: "Run Libretto Workflow",
   description:
-    "Start a deployed Libretto browser workflow job and route its results back to a Notion database.",
+    "Create a one-off job for a deployed Libretto browser workflow. The workflow returns JSON results to Libretto; if callback env vars are configured, Libretto posts completion to this worker's webhook, which writes rows to Notion.",
   schema: j.object({
     workflow: j.string().describe("The deployed Libretto workflow name."),
     databaseUrl: j
       .string()
       .describe("The Notion database URL or database ID where workflow results should be written."),
-    paramsJson: j
-      .string()
-      .nullable()
-      .describe("Optional JSON object parameters to pass to the workflow, or null."),
-    nonce: j
-      .string()
-      .nullable()
-      .describe("Optional idempotency nonce, or null."),
-    timeoutSeconds: j
-      .integer()
-      .nullable()
-      .describe("Optional timeout in seconds, or null for Libretto default."),
   }),
-  execute: async ({ workflow, databaseUrl, paramsJson, nonce, timeoutSeconds }) => {
+  execute: async ({ workflow, databaseUrl }) => {
     const databaseId = extractNotionDatabaseId(databaseUrl);
-    const params = paramsJson ? parseJsonObject(paramsJson, "paramsJson") : {};
+    const params = { database_id: databaseId };
+    const callbackOptions = getCallbackOptions();
+    const run = await createJob(workflow, params, callbackOptions);
+    const jobId = getRequiredString(run, "job_id");
+    const callbackEnabled = Object.keys(callbackOptions).length > 0;
 
-    return callLibretto("/v1/jobs/create", {
-      workflow,
-      params: {
-        ...params,
+    return {
+      run,
+      job_id: jobId,
+      database_id: databaseId,
+      callback_enabled: callbackEnabled,
+      message:
+        callbackEnabled
+          ? "Libretto job has started with webhook delivery enabled. The workflow should return JSON rows; Libretto will call this worker's webhook, and the worker will write rows to Notion. Use checkRun only to monitor status."
+          : "Libretto job has started without webhook delivery because callback env vars are not configured. Use checkRun to monitor status; results will be returned but not automatically inserted into Notion.",
+    };
+  },
+});
+
+worker.tool("checkRun", {
+  title: "Check Libretto Workflow Run",
+  description:
+    "Check a Libretto browser workflow job by job ID. This is read-only: completed jobs return their JSON result, and Notion insertion is handled by the worker webhook callback when callback delivery is enabled.",
+  schema: j.object({
+    jobId: j.string().describe("The Libretto job ID returned by runWorkflow."),
+    databaseUrl: j
+      .string()
+      .describe("The Notion database URL or database ID where workflow results should be written."),
+  }),
+  execute: async ({ jobId, databaseUrl }, { notion }) => {
+    const databaseId = extractNotionDatabaseId(databaseUrl);
+    void notion;
+    const job = await callLibretto("/v1/jobs/get", { id: jobId });
+
+    if (isJobFailed(job)) {
+      throw new Error(`Libretto job ${jobId} failed: ${JSON.stringify(job)}`);
+    }
+
+    if (!isJobDone(job)) {
+      return {
+        job,
+        job_id: jobId,
         database_id: databaseId,
-      },
-      ...getLibrettoCallbackConfig(),
-      ...(nonce ? { nonce } : {}),
-      ...(timeoutSeconds ? { timeout_seconds: timeoutSeconds } : {}),
+        result_rows: 0,
+        result: null,
+        message:
+          "Libretto job is still running. Call checkRun again with this job_id.",
+      };
+    }
+
+    const result = isPlainObject(job) ? job.result : undefined;
+    const rows = resultRows(result);
+
+    return {
+      job,
+      job_id: jobId,
+      database_id: databaseId,
+      result_rows: rows.length,
+      result: result ?? null,
+      message:
+        "Libretto job completed. checkRun is read-only; if webhook delivery was enabled for this job, the worker webhook handles inserting rows into Notion.",
+    };
+  },
+});
+
+worker.tool("createSchedule", {
+  title: "Create Libretto Workflow Schedule",
+  description:
+    "Create a recurring schedule for a deployed Libretto browser workflow. Use this only after checkBuild has returned a workflow_name.",
+  schema: j.object({
+    workflow: j.string().describe("The deployed Libretto workflow name."),
+    databaseUrl: j
+      .string()
+      .describe("The Notion database URL or database ID to include in scheduled job params."),
+    cron: j.string().describe("Cron expression for recurring Libretto runs."),
+  }),
+  execute: async ({ workflow, databaseUrl, cron }) => {
+    const databaseId = extractNotionDatabaseId(databaseUrl);
+    const callbackOptions = getCallbackOptions();
+    const schedule = await callLibretto("/v1/schedules/create", {
+      workflow,
+      params: { database_id: databaseId },
+      cron_expr: cron,
+      ...callbackOptions,
     });
+
+    return {
+      schedule,
+      database_id: databaseId,
+      callback_enabled: Object.keys(callbackOptions).length > 0,
+      message:
+        Object.keys(callbackOptions).length > 0
+          ? "Schedule created with callback delivery enabled."
+          : "Schedule created without callback delivery. Set callback env vars if scheduled runs should write results into Notion automatically.",
+    };
   },
 });
 
@@ -155,9 +209,14 @@ worker.webhook("insertIntoDatabase", {
   description:
     "Receives { data, database_id } and creates a new page in the given Notion database, mapping each field in data onto whatever properties the database exposes.",
   execute: async (events, { notion }) => {
-    const secret = process.env.WEBHOOK_SHARED_SECRET;
-
     for (const event of events) {
+      const payload = event.body as Record<string, unknown>;
+      if (isLibrettoCallback(payload)) {
+        await handleLibrettoCallback(payload, notion, event.headers);
+        continue;
+      }
+
+      const secret = process.env.WEBHOOK_SHARED_SECRET;
       if (secret) {
         const provided = event.headers["x-webhook-secret"];
         if (provided !== secret) {
@@ -165,43 +224,185 @@ worker.webhook("insertIntoDatabase", {
         }
       }
 
-      const { databaseId, data } = parseInsertPayload(event.body);
+      const databaseId = payload.database_id;
+      const data = payload.data;
 
+      if (typeof databaseId !== "string" || databaseId.length === 0) {
+        throw new Error("Missing or invalid `database_id` in payload");
+      }
       if (!isPlainObject(data)) {
         throw new Error("Missing or invalid `data` in payload (must be a JSON object)");
       }
 
-      // Notion's 2025-09-03 API split databases into databases + data sources.
-      // Property schema lives on the data source, not the database.
-      const database = (await notion.databases.retrieve({
-        database_id: databaseId,
-      })) as unknown as { data_sources?: { id: string }[] };
-
-      const dataSourceId = database.data_sources?.[0]?.id;
-      if (!dataSourceId) {
-        throw new Error(`Database ${databaseId} has no data sources`);
-      }
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const dataSource = (await (notion as any).dataSources.retrieve({
-        data_source_id: dataSourceId,
-      })) as { properties: Schema };
-
-      const properties = buildProperties(data, dataSource.properties);
-
-      const created = await notion.pages.create({
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        parent: { data_source_id: dataSourceId } as any,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        properties: properties as any,
-      });
-
-      console.log(
-        `Inserted page ${("id" in created && created.id) || "?"} into database ${databaseId}`,
-      );
+      await insertRow(notion, databaseId, data);
     }
   },
 });
+
+async function handleLibrettoCallback(
+  payload: Record<string, unknown>,
+  notion: NotionClient,
+  headers: Record<string, string>,
+) {
+  const callbackSecret = getCallbackSecret();
+  if (callbackSecret) {
+    verifyLibrettoSignature(payload, headers, callbackSecret);
+  }
+
+  if (payload.event === "job.failed" || payload.status === "failed") {
+    throw new Error(
+      `Libretto job ${String(payload.job_id)} failed: ${JSON.stringify(
+        payload.error ?? payload.mapped_stack ?? payload,
+      )}`,
+    );
+  }
+
+  const jobId = getRequiredString(payload, "job_id");
+  const job = await callLibretto("/v1/jobs/get", { id: jobId });
+  const jobObject = isPlainObject(job) ? job : {};
+  const params = isPlainObject(jobObject.params) ? jobObject.params : {};
+  const databaseId = params.database_id ?? payload.database_id;
+  const result = payload.result ?? jobObject.result;
+
+  if (typeof databaseId !== "string" || databaseId.length === 0) {
+    throw new Error(`Libretto job ${jobId} did not include params.database_id`);
+  }
+
+  for (const row of resultRows(result)) {
+    await insertRow(notion, databaseId, row);
+  }
+}
+
+function isLibrettoCallback(payload: Record<string, unknown>) {
+  return typeof payload.job_id === "string" && typeof payload.workflow === "string";
+}
+
+async function createJob(
+  workflow: string,
+  params: JsonObject,
+  options: JsonObject = {},
+) {
+  return callLibretto("/v1/jobs/create", {
+    workflow,
+    params,
+    ...options,
+  });
+}
+
+function getCallbackOptions(): Record<string, string> {
+  const callbackUrl =
+    process.env.LIBRETTO_CALLBACK_URL ??
+    process.env.LIBRETTO_WEBHOOK_URL ??
+    process.env.WEBHOOK_URL;
+  if (!callbackUrl) return {};
+
+  const callbackSecret = getCallbackSecret();
+  if (!callbackSecret) {
+    throw new Error(
+      "LIBRETTO_CALLBACK_URL is configured but LIBRETTO_CALLBACK_SECRET is missing",
+    );
+  }
+
+  return {
+    callback_url: callbackUrl,
+    callback_secret: callbackSecret,
+  };
+}
+
+function getCallbackSecret() {
+  return process.env.LIBRETTO_CALLBACK_SECRET ?? process.env.WEBHOOK_SHARED_SECRET;
+}
+
+function buildPrompt(prompt: string) {
+  return [
+    prompt,
+    "",
+    "Return the scraped data as a flat JSON object or an array of flat JSON objects.",
+    "Use keys that exactly match the target Notion database properties.",
+    "Do not call Notion directly. Return the result data only; this worker's webhook receives the Libretto job callback and writes rows to Notion.",
+  ].join("\n");
+}
+
+async function insertRow(
+  notion: NotionClient,
+  databaseId: string,
+  data: Record<string, unknown>,
+) {
+  // Notion's 2025-09-03 API split databases into databases + data sources.
+  // Property schema lives on the data source, not the database.
+  const database = (await notion.databases.retrieve({
+    database_id: databaseId,
+  })) as unknown as { data_sources?: { id: string }[] };
+
+  const dataSourceId = database.data_sources?.[0]?.id;
+  if (!dataSourceId) {
+    throw new Error(`Database ${databaseId} has no data sources`);
+  }
+
+  const dataSource = (await notion.dataSources.retrieve({
+    data_source_id: dataSourceId,
+  })) as { properties: Schema };
+
+  const properties = buildProperties(data, dataSource.properties);
+
+  const created = await notion.pages.create({
+    parent: { data_source_id: dataSourceId },
+    properties,
+  });
+
+  console.log(
+    `Inserted page ${("id" in created && created.id) || "?"} into database ${databaseId}`,
+  );
+}
+
+function resultRows(result: unknown): Record<string, unknown>[] {
+  if (Array.isArray(result)) {
+    return result.filter(isPlainObject);
+  }
+
+  if (!isPlainObject(result)) {
+    throw new Error("Libretto job result was not a JSON object or array");
+  }
+
+  if (Array.isArray(result.rows)) {
+    return result.rows.filter(isPlainObject);
+  }
+
+  if (Array.isArray(result.items)) {
+    return result.items.filter(isPlainObject);
+  }
+
+  if (isPlainObject(result.data)) {
+    return [result.data];
+  }
+
+  return [result];
+}
+
+function verifyLibrettoSignature(
+  payload: Record<string, unknown>,
+  headers: Record<string, string>,
+  secret: string,
+) {
+  const provided = headers["x-webhook-signature"];
+  if (!provided) {
+    throw new WebhookVerificationError("Missing x-webhook-signature");
+  }
+
+  const expected = createHmac("sha256", secret)
+    .update(JSON.stringify(payload))
+    .digest("hex");
+  const signature = provided.includes("=") ? provided.split("=").at(-1)! : provided;
+  const expectedBuffer = Buffer.from(expected, "hex");
+  const actualBuffer = Buffer.from(signature, "hex");
+
+  if (
+    expectedBuffer.length !== actualBuffer.length ||
+    !timingSafeEqual(expectedBuffer, actualBuffer)
+  ) {
+    throw new WebhookVerificationError("Invalid x-webhook-signature");
+  }
+}
 
 function buildProperties(
   data: Record<string, unknown>,
@@ -254,6 +455,8 @@ function buildPropertyValue(type: string, value: unknown): unknown | undefined {
       return { checkbox: Boolean(value) };
     case "select":
       return { select: { name: asString(value) } };
+    case "status":
+      return { status: { name: asString(value) } };
     case "multi_select": {
       const names = Array.isArray(value)
         ? value.map(asString)
@@ -288,45 +491,68 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function getLibrettoCallbackConfig(): {
-  callback_url: string;
-  callback_secret: string;
-} {
-  const callbackUrl = process.env.LIBRETTO_CALLBACK_URL;
-  const callbackSecret = process.env.LIBRETTO_CALLBACK_SECRET;
-
-  if (!callbackUrl) {
-    throw new Error("LIBRETTO_CALLBACK_URL is not configured");
-  }
-  if (!callbackSecret) {
-    throw new Error("LIBRETTO_CALLBACK_SECRET is not configured");
-  }
+function formatBuildStatus(build: JsonValue, fallbackBuildId: string) {
+  const buildObject = isPlainObject(build) ? build : {};
+  const buildId =
+    typeof buildObject.build_id === "string" && buildObject.build_id.length > 0
+      ? buildObject.build_id
+      : fallbackBuildId;
+  const status =
+    typeof buildObject.status === "string" && buildObject.status.length > 0
+      ? buildObject.status
+      : "unknown";
+  const workflowName =
+    typeof buildObject.workflow_name === "string" &&
+    buildObject.workflow_name.length > 0
+      ? buildObject.workflow_name
+      : null;
+  const deploymentId =
+    typeof buildObject.deployment_id === "string" &&
+    buildObject.deployment_id.length > 0
+      ? buildObject.deployment_id
+      : null;
+  const attemptedSteps = Array.isArray(buildObject.attempted_steps)
+    ? buildObject.attempted_steps.filter(
+        (step): step is string => typeof step === "string",
+      )
+    : [];
 
   return {
-    callback_url: callbackUrl,
-    callback_secret: callbackSecret,
+    build,
+    build_id: buildId,
+    status,
+    workflow_name: workflowName,
+    deployment_id: deploymentId,
+    summary:
+      typeof buildObject.summary === "string" ? buildObject.summary : null,
+    error: typeof buildObject.error === "string" ? buildObject.error : null,
+    details:
+      typeof buildObject.details === "string" ? buildObject.details : null,
+    attempted_steps: attemptedSteps,
+    message: buildStatusMessage(status, workflowName, attemptedSteps),
   };
 }
 
-function parseInsertPayload(body: unknown): {
-  databaseId: string;
-  data: unknown;
-} {
-  if (!isPlainObject(body)) {
-    throw new Error("Webhook payload must be a JSON object");
+function buildStatusMessage(
+  status: string,
+  workflowName: string | null,
+  attemptedSteps: string[],
+) {
+  const lowerStatus = status.toLowerCase();
+  const stepsSummary =
+    attemptedSteps.length > 0
+      ? ` attempted_steps contains ${attemptedSteps.length} builder step(s) for debugging.`
+      : "";
+
+  if (BUILD_READY_STATUSES.has(lowerStatus)) {
+    return `Workflow build is ready. Use workflow_name "${workflowName}" with runWorkflow or createSchedule.${stepsSummary}`;
   }
 
-  const databaseId = body.database_id;
-  const directData = body.data;
-  const resultData = isPlainObject(body.result) ? body.result.data : undefined;
-  const result = isPlainObject(body.result) ? body.result : undefined;
-  const data = directData ?? resultData ?? result;
-
-  if (typeof databaseId !== "string" || databaseId.length === 0) {
-    throw new Error("Missing or invalid `database_id` in payload");
+  if (BUILD_FAILED_STATUSES.has(lowerStatus)) {
+    return `Workflow build failed. Use error, details, and attempted_steps to explain the root cause.${stepsSummary}`;
   }
 
-  return { databaseId, data };
+  return `Workflow build status is "${status}". Call checkBuild again later; attempted_steps shows current builder progress.${stepsSummary}`;
 }
 
 function extractNotionDatabaseId(value: string): string {
@@ -347,29 +573,6 @@ function extractNotionDatabaseId(value: string): string {
   ].join("-");
 }
 
-async function waitForBuild(buildId: string) {
-  let latest = await callLibretto("/v1/workflows/buildStatus", {
-    build_id: buildId,
-  });
-
-  for (let attempt = 0; attempt < BUILD_POLL_ATTEMPTS; attempt += 1) {
-    if (hasString(latest, "error")) {
-      throw new Error(`Libretto workflow build failed: ${latest.error}`);
-    }
-
-    if (hasString(latest, "workflow_name")) {
-      return latest;
-    }
-
-    await sleep(BUILD_POLL_INTERVAL_MS);
-    latest = await callLibretto("/v1/workflows/buildStatus", {
-      build_id: buildId,
-    });
-  }
-
-  return latest;
-}
-
 function getRequiredString(value: unknown, key: string): string {
   if (!hasString(value, key)) {
     throw new Error(`Libretto response did not include ${key}`);
@@ -386,8 +589,18 @@ function hasString(value: unknown, key: string): value is Record<string, string>
   return typeof candidate === "string" && candidate.length > 0;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
+function isJobDone(value: unknown) {
+  if (!hasString(value, "status")) {
+    return false;
+  }
+
+  return JOB_DONE_STATUSES.has(value.status!.toLowerCase());
+}
+
+function isJobFailed(value: unknown) {
+  if (!hasString(value, "status")) {
+    return false;
+  }
+
+  return JOB_FAILED_STATUSES.has(value.status!.toLowerCase());
 }

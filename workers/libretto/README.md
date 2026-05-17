@@ -6,9 +6,10 @@ All `npm` and `ntn` commands below assume you are inside `workers/libretto/`.
 
 ## Agent tools
 
-- `buildWorkflow`: asks Libretto Cloud to build a browser workflow, polls until a deployed workflow is available, runs it once, and optionally creates a recurring schedule.
+- `buildWorkflow`: asks Libretto Cloud to start building a browser workflow and returns a build ID.
 - `checkBuild`: checks a Libretto AI workflow build status when a build needs manual follow-up.
 - `runWorkflow`: starts a deployed Libretto workflow job and passes the target Notion database URL or ID in the job params.
+- `createSchedule`: creates a recurring schedule for a deployed Libretto workflow after `checkBuild` returns a `workflow_name`.
 - `listWorkflows`: returns every Libretto workflow on the account (deployed plus in-progress builds), so the agent can pick one before calling `runWorkflow`. Libretto's API does not expose per-workflow parameter schemas — names are the primary hint about what each one accepts.
 - `deleteWorkflow`: permanently deletes a Libretto workflow by name. Destructive and irreversible; confirm the name with the user before invoking.
 
@@ -20,16 +21,17 @@ Example tool input:
 {
   "databaseUrl": "https://www.notion.so/3c9bab308c7c4808b9c122df75a8e48f",
   "initialUrl": "https://example.com",
-  "prompt": "Build a browser workflow that extracts listings. Output each row with properties matching this Notion database shape: {\"Title\":\"Mid-century chair\",\"URL\":\"https://example.com/listing/123\",\"Price\":240}.",
-  "schedule": ""
+  "prompt": "Build a browser workflow that extracts listings. Output each row with properties matching this Notion database shape: {\"Title\":\"Mid-century chair\",\"URL\":\"https://example.com/listing/123\",\"Price\":240}."
 }
 ```
 
-Use a cron expression for recurring runs:
+Use `createSchedule` with a cron expression for recurring runs after the build is ready:
 
 ```json
 {
-  "schedule": "0 */6 * * *"
+  "workflow": "workflow-name-from-checkBuild",
+  "databaseUrl": "https://www.notion.so/3c9bab308c7c4808b9c122df75a8e48f",
+  "cron": "0 */6 * * *"
 }
 ```
 
