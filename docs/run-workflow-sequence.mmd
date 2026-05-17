@@ -1,0 +1,40 @@
+sequenceDiagram
+  participant User as User
+  participant NotionAgent as Notion Agent
+  participant Worker as Notion Worker
+  participant Notion as Notion API
+  participant Libretto as Libretto Cloud
+
+  User->>NotionAgent: run workflow request (in Notion)
+
+  NotionAgent->>Worker: call listWorkflows()
+  Worker->>Libretto: POST /v1/workflows/list
+  Libretto-->>Worker: workflows
+  Worker->>Libretto: POST /v1/workflows/get (workflow names + input/output schemas)
+  Libretto-->>Worker: input_schema, output_schema per workflow
+  Worker-->>NotionAgent: workflows + input/output schemas
+
+  NotionAgent-->>User: confirm inputs/outputs
+  User-->>NotionAgent: confirmed
+
+  NotionAgent->>Worker: call runWorkflow(workflow_name, inputs, databaseUrl)
+  Worker->>Libretto: POST /v1/jobs/create
+  Note over Worker,Libretto: params.database_id +<br/>callback URL/secret
+  Libretto-->>Worker: job_id
+  Worker-->>NotionAgent: job_id
+
+  Libretto->>Libretto: execute workflow
+
+  loop Until run is done
+    NotionAgent->>Worker: call checkRun(job_id)
+    Worker->>Libretto: POST /v1/jobs/get
+    Libretto-->>Worker: job status (running / done / failed)
+    Worker-->>NotionAgent: run status
+  end
+
+  Libretto->>Worker: POST callback (webhook) with databaseUrl + result
+  Worker->>Notion: insert result rows into database
+  Notion-->>Worker: pages created
+
+  Worker-->>NotionAgent: run finished
+  NotionAgent-->>User: run complete, results inserted into Notion

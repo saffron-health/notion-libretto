@@ -1,0 +1,34 @@
+sequenceDiagram
+  participant User as User
+  participant NotionAgent as Notion Agent
+  participant Worker as Notion Worker
+  participant Notion as Notion API
+  participant Libretto as Libretto Cloud
+
+  User->>NotionAgent: workflow build request (intent + initial_url, optional credential_id)
+
+  NotionAgent->>Notion: create database with schema matching request
+  Notion-->>NotionAgent: database_id + databaseUrl
+
+  NotionAgent->>Worker: call buildWorkflow(databaseUrl, initial_url, prompt, credential_id?)
+
+  Worker->>Notion: retrieve database schema
+  Notion-->>Worker: database properties
+
+  Worker->>Worker: append JSON output instructions to prompt
+
+  Worker->>Libretto: POST /v1/workflows/build
+  Note over Worker,Libretto: Sends prompt, initial_url,<br/>params.database_id,<br/>and credential_id if provided
+
+  Libretto-->>Worker: build_id
+  Worker-->>NotionAgent: return build_id
+  NotionAgent-->>User: build started (build_id)
+
+  loop Until build is ready
+    NotionAgent->>Worker: call checkBuild(build_id)
+    Worker->>Libretto: POST /v1/workflows/buildStatus
+    Libretto-->>Worker: status, attempted_steps, workflow_name
+    Worker-->>NotionAgent: build status
+  end
+
+  NotionAgent-->>User: workflow ready (workflow_name)
